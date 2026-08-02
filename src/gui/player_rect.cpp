@@ -3,7 +3,10 @@
 #include "../gui_interface.h"
 #include "src/player/ffmpeg/video_player.h"
 
+#include <algorithm>
+
 constexpr uint32_t HUD_LABEL_FONT_SIZE = 20;
+constexpr std::size_t MAX_WIFI_LINKS = 2;
 
 class SignalBar : public vecgui::ProgressBar {
     void custom_ready() override {
@@ -102,10 +105,10 @@ void PlayerRect::custom_ready() {
         lq_container->set_separation(2);
         lq_container->set_anchor_flag(vecgui::AnchorFlag::BottomWide);
 
-        for (int i = 0; i < 2; i++) {
-            for (int j = 0; j < ANTENNA_COUNT; j++) {
+        for (std::size_t i = 0; i < MAX_WIFI_LINKS; ++i) {
+            for (std::size_t j = 0; j < MAX_RX_CHAINS; ++j) {
                 auto bar = std::make_shared<SignalBar>();
-                if (j == 0) {
+                if (j < MAX_RX_CHAINS / 2) {
                     bar->set_fill_mode(vecgui::ProgressBar::FillMode::RightToLeft);
                 } else {
                     bar->set_fill_mode(vecgui::ProgressBar::FillMode::LeftToRight);
@@ -187,12 +190,19 @@ void PlayerRect::custom_ready() {
             bar->set_visibility(false);
         }
 
-        for (int i = 0; i != GuiInterface::Instance().links_.size(); ++i) {
-            auto link_score = GuiInterface::Instance().links_[i]->get_link_score();
+        const auto link_count = std::min(GuiInterface::Instance().links_.size(), MAX_WIFI_LINKS);
+        for (std::size_t i = 0; i < link_count; ++i) {
+            const auto &link = GuiInterface::Instance().links_[i];
+            const auto link_score = link->get_link_score();
+            const auto rx_chain_count = std::min(link->get_rx_chain_count(), MAX_RX_CHAINS);
 
-            for (int j = 0; j != ANTENNA_COUNT; ++j) {
-                link_score_bars_[i * 2 + j]->set_visibility(true);
-                link_score_bars_[i * 2 + j]->set_value(link_score[j]);
+            for (std::size_t j = 0; j < rx_chain_count; ++j) {
+                const auto bar_index = i * MAX_RX_CHAINS + j;
+                link_score_bars_[bar_index]->set_fill_mode(
+                    j < rx_chain_count / 2 ? vecgui::ProgressBar::FillMode::RightToLeft
+                                           : vecgui::ProgressBar::FillMode::LeftToRight);
+                link_score_bars_[bar_index]->set_visibility(true);
+                link_score_bars_[bar_index]->set_value(link_score[j]);
             }
         }
 

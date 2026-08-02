@@ -190,7 +190,7 @@ public:
     }
 
     static std::string GetAppDataDir() {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
         auto dir = std::string(getenv("APPDATA")) + "\\Aviateur\\";
 #elif defined(__APPLE__)
         std::string home_dir = getenv("HOME");

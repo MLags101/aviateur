@@ -353,7 +353,7 @@ void TxFrame::dataSource(std::shared_ptr<Transmitter> &transmitter,
     }
 }
 
-void TxFrame::run(Rtl8812aDevice *rtlDevice, TxArgs *arg) {
+void TxFrame::run(RtlJaguarDevice *rtlDevice, TxArgs *arg) {
     // Decide if using VHT
     if (arg->bandwidth >= 80) {
         arg->vht_mode = true;

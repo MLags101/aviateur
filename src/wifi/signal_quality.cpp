@@ -1,6 +1,7 @@
 #include "signal_quality.h"
 
 #include <chrono>
+#include <cmath>
 #include <random>
 
 namespace {
@@ -45,28 +46,26 @@ void SignalQualityCalculator::cleanup_old_fec_data() {
     std::erase_if(fec_data_, [&](const FecEntry &entry) { return entry.timestamp < cutoff; });
 }
 
-void SignalQualityCalculator::add_rssi(uint8_t ant1, uint8_t ant2) {
+void SignalQualityCalculator::add_rssi(const std::array<uint8_t, MAX_RX_CHAINS> &rssi) {
     std::lock_guard lock(mutex_);
 
     RssiEntry entry;
     entry.timestamp = std::chrono::steady_clock::now();
-    entry.ant1 = ant1;
-    entry.ant2 = ant2;
+    entry.values = rssi;
     rssi_data_.push_back(entry);
 }
 
-void SignalQualityCalculator::add_snr(int8_t ant1, int8_t ant2) {
+void SignalQualityCalculator::add_snr(const std::array<int8_t, MAX_RX_CHAINS> &snr) {
     std::lock_guard lock(mutex_);
 
     SnrEntry entry;
     entry.timestamp = std::chrono::steady_clock::now();
-    entry.ant1 = ant1;
-    entry.ant2 = ant2;
+    entry.values = snr;
     snr_data_.push_back(entry);
 }
 
 SignalQualityCalculator::SignalQuality SignalQualityCalculator::calculate_signal_quality() {
-    SignalQuality ret;
+    SignalQuality ret{};
     std::lock_guard lock(mutex_);
 
     // Make sure we clean up old data first
@@ -83,24 +82,20 @@ SignalQualityCalculator::SignalQuality SignalQualityCalculator::calculate_signal
     ret.recovered_last_second = p_recovered;
     ret.total_last_second = p_total;
 
-    ret.rssi[0] = round(avg_rssi.first);
-    ret.rssi[1] = round(avg_rssi.second);
-    ret.snr[0] = round(avg_snr.first);
-    ret.snr[1] = round(avg_snr.second);
     ret.idr_code = idr_code_;
 
-    // RSSI falls in range [0, 126], and we map it from range [0, 126] to [1000, 2000].
-    float rssi0 = map_range(avg_rssi.first, 50.f, 110.f, 1000.f, 2000.f);
-    float rssi1 = map_range(avg_rssi.second, 50.f, 110.f, 1000.f, 2000.f);
+    for (std::size_t chain = 0; chain < MAX_RX_CHAINS; ++chain) {
+        ret.rssi[chain] = std::lround(avg_rssi[chain]);
+        ret.snr[chain] = std::lround(avg_snr[chain]);
 
-    // SNR falls in range [0, 60], and we map it from range [0, 60] to [1000, 2000].
-    float snr0 = map_range(avg_snr.first, 20.f, 50.f, 1000.f, 2000.f);
-    float snr1 = map_range(avg_snr.second, 20.f, 50.f, 1000.f, 2000.f);
+        // RSSI falls in range [0, 126], and SNR falls in range [0, 60].
+        const float mapped_rssi = map_range(avg_rssi[chain], 50.f, 110.f, 1000.f, 2000.f);
+        const float mapped_snr = map_range(avg_snr[chain], 20.f, 50.f, 1000.f, 2000.f);
 
-    // Link Score = (weight1 * RSSI) + (weight2 * SNR)
-    // See https://github.com/OpenIPC/adaptive-link
-    ret.link_score[0] = round(0.5f * rssi0 + 0.5f * snr0);
-    ret.link_score[1] = round(0.5f * rssi1 + 0.5f * snr1);
+        // Link Score = (weight1 * RSSI) + (weight2 * SNR)
+        // See https://github.com/OpenIPC/adaptive-link
+        ret.link_score[chain] = std::lround(0.5f * mapped_rssi + 0.5f * mapped_snr);
+    }
 
     return ret;
 }

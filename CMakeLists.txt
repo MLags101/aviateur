@@ -107,8 +107,15 @@ add_subdirectory(src/player)
 add_subdirectory(src/wifi)
 add_subdirectory(src/feature)
 
-if (WIN32)
+if (MSVC)
     string(APPEND CMAKE_CXX_FLAGS " /utf-8")
+endif ()
+
+if (NOT EXISTS "${CMAKE_SOURCE_DIR}/3rd/devourer/src/RtlJaguarDevice.h")
+    message(FATAL_ERROR
+            "The devourer submodule is not at Aviateur's required AWUS1900 revision. "
+            "Run: git submodule update --init --recursive && "
+            "git -C 3rd/devourer checkout e74d57e96b8e47a6ea6dae6778414e1bf09ddbc2")
 endif ()
 
 add_subdirectory(3rd/devourer)
@@ -129,6 +136,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE "3rd/SDL/include")
 target_include_directories(${PROJECT_NAME} PRIVATE "src/wifi/wfb-ng/include")
 
 if (WIN32)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_directories(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARY_DIRS})
     target_link_libraries(${PROJECT_NAME} PRIVATE
             ${FFMPEG_LIBRARIES}
             PkgConfig::LIBUSB
@@ -136,6 +145,7 @@ if (WIN32)
             WiFiDriver
             vecgui
             SDL3::SDL3-static
+            ws2_32
     )
 else ()
     target_link_libraries(${PROJECT_NAME} PRIVATE

@@ -1,0 +1,165 @@
+# Low-latency ground station for RunCam WiFiLink 2 without an RTL8812AU
+
+Research + option evaluation. Target: desktop Linux, Windows nice-to-have.
+
+---
+
+## 1. What you're actually receiving
+
+| | |
+|---|---|
+| Air-unit SoC | SigmaStar SSC338Q |
+| Air-unit radio | **Runcam custom RTL8812EU**, supports 5 / 10 / 20 MHz |
+| Default link | **Channel 161, 20 MHz** |
+| Protocol | stock **wfb-ng** — raw 802.11 data frames, ChaCha20 encryption (libsodium) keyed by `gs.key`, Reed-Solomon FEC |
+| Payload | H.264/H.265 in RTP |
+
+Receiving it is four steps: **capture raw frames on ch161 → wfb-ng decrypt + FEC decode → RTP → decode + render**.
+
+Nothing in that chain requires an RTL8812AU. There are only two real hardware requirements:
+
+1. **Monitor-mode capture** of all frames on the correct channel/width.
+2. **The PHY must be able to demodulate what the air unit transmits** — the HT/VHT rate, LDPC and STBC if the air unit has them enabled, and the channel width. This is the requirement people forget.
+
+**The big simplification: video downlink is RX-only.** Injection is only needed for the uplink (RC, MAVLink, adaptive-link feedback). If you just want a video window, you never inject a packet — which neutralizes the single biggest weakness of your MediaTek adapter.
+
+wfb-ng's own maintainer confirms this: *"If you want only RX then in theory any card with monitoring mode will be suitable."* The RTL8812AU/EU-only support statement is about **injection quality and TX power control**, not reception.
+
+---
+
+## 2. Your three adapters, decoded
+
+| Adapter | Chipset | USB ID | Verdict |
+|---|---|---|---|
+| **Alfa AWUS1900** | **RTL8814AU** | `0bda:8813` | **Best option.** 5 GHz, 4T4R. Already supported by OpenIPC's `devourer` userspace driver. Works on Linux *and* Windows. |
+| **Alfa AWUS036AXML** | **MT7921AU** (Wi-Fi 6E) | `0e8d:7961` | Viable on Linux only, RX-only, via in-kernel `mt7921u` + libpcap. Injection is documented-broken (falls back to 6 Mbps). Monitor mode reported broken on some recent kernels (~6.18). |
+| **Panda PAU06** | Ralink **RT5372** | — | **Dead end.** 2.4 GHz only; WiFiLink 2 is 5.8 GHz. Also, wfb-ng docs state Ralink injection is broken on modern kernels. Ignore it. |
+
+The AWUS1900 being an RTL8814AU is the key finding of this whole exercise — see below.
+
+---
+
+## 3. The critical discovery: devourer already supports your AWUS1900
+
+Aviateur is not a monolith. Its `CMakeLists.txt` shows it bundles **`3rd/devourer`** — OpenIPC's userspace Realtek driver (originally by buldo, C-ported by josephnef) — as its Wi-Fi backend. That's why Windows needs Zadig/libusb: devourer talks to the chip directly over libusb, no kernel driver.
+
+Devourer's current supported-hardware matrix is **far** wider than Aviateur's README suggests:
+
+> RTL8812AU, RTL8811AU, **RTL8814AU (`0bda:8813`, tested on CF-938AC/CF-960AC)**, RTL8821AU, RTL8822BU, RTL8812BU, RTL8811CU, RTL8821CU, RTL8812CU, RTL8822CU, RTL8812EU, RTL8822EU, RTL8821CE, RTL8852BU, RTL8832BU, RTL8832CU, RTL8852CU
+
+Aviateur's "Only RTL8812AU Wi-Fi adapter is supported" note is **stale relative to its own vendored dependency**. Your AWUS1900 is a chipset devourer explicitly lists, benchmarks, and supports 5/10 MHz narrowband on.
+
+*Caveat:* devourer's benchmark table flags 8814AU 5 GHz throughput with `†` — "works on-air but the reading varies run-to-run." For receiving a ~4–20 Mbps FPV stream at 20 MHz that's almost certainly irrelevant, but it's the one thing to validate early.
+
+---
+
+## 4. Option evaluation
+
+### Option A — Fork Aviateur, enable RTL8814AU via devourer ⭐ **recommended**
+
+**What it is:** Fork `OpenIPC/aviateur`, bump the `3rd/devourer` submodule, extend the adapter enumeration/VID-PID allowlist to include `0bda:8813`, add the udev rule, test.
+
+| | |
+|---|---|
+| Effort | **Low — days, not months.** Most likely a VID/PID list, a device-selection dropdown, and a udev rule. The driver work is already done. |
+| Linux | ✅ |
+| Windows | ✅ (same libusb/Zadig path — this is Aviateur's *only* Windows path) |
+| Adapter used | AWUS1900 |
+| Uplink/injection possible later | ✅ devourer does per-packet radiotap: rate, BW, GI, STBC, TX power |
+| Risk | 8814AU 5 GHz variance; Aviateur's GUI may hardcode 8812AU assumptions in a few places |
+
+This is the highest value-per-hour path by a wide margin, and it's the only one that gives you Windows.
+
+### Option B — Linux kernel monitor mode + libpcap (possibly zero code)
+
+Two sub-variants:
+
+**B1 — Aviateur may already do this on Linux.** Its build config is revealing:
+
+```cmake
+if (WIN32)
+    ... cross/*.cpp, wfb-ng/zfex.c ... link libusb
+else ()
+    ... wfb-ng/*.cpp, wfb-ng/*.c, linux/*.cpp ... link pcap
+endif ()
+```
+
+On non-Windows, Aviateur compiles the **full wfb-ng C sources plus a `src/wifi/linux/` platform layer and links libpcap**. Windows gets neither. That strongly implies a pcap-on-monitor-interface RX path already exists on Linux and only the libusb path is exposed prominently. **Verify this before writing any code** — you may need nothing more than a UI toggle to make the AWUS036AXML work today.
+
+**B2 — Skip the GUI entirely.** Run stock wfb-ng:
+
+```bash
+sudo ip link set wlan0 down
+sudo iw dev wlan0 set monitor otherbss
+sudo ip link set wlan0 up
+sudo iw dev wlan0 set channel 161 HT20
+sudo wfb_rx -p 0 -u 5600 -K gs.key -i <link_id> wlan0
+ffplay -fflags nobuffer -flags low_delay -probesize 32 \
+       -f rtp rtp://127.0.0.1:5600     # or mpv / gstreamer
+```
+
+This works **tonight** with either the AXML or the AWUS1900 (latter needs `morrownr/8814au` DKMS). It's the fastest way to prove the link before investing in app work.
+
+| | |
+|---|---|
+| Effort | **Zero to trivial** |
+| Linux | ✅ |
+| Windows | ❌ Npcap can't do monitor mode on consumer NICs |
+| Loses | 5/10 MHz narrowband (mt76 can't), TX power control, clean injection |
+| Bonus | wfb-ng natively aggregates **multiple RX interfaces** — free antenna diversity across both adapters |
+
+### Option C — Add MediaTek support to devourer
+
+**Don't.** Devourer is a userspace re-host of Realtek's own HAL — vendor register tables, halbb/halrf, firmware blobs, compiled verbatim. There is no MediaTek equivalent to port. You'd be writing a userspace mt76 from scratch: months of work, and the in-kernel mt76 driver already gives you monitor mode for free (Option B). The only thing you'd gain is Windows support for the AXML, which is not worth it.
+
+### Option D — Custom app built directly on wfb-ng
+
+wfb-ng's receive side is a compact C++ core: pcap capture → libsodium decrypt → Reed-Solomon FEC → UDP RTP out. Wrapping it in your own Qt/SDL/ImGui app with a hardware decoder is genuinely tractable.
+
+But this is **rebuilding Aviateur**. Aviateur is already exactly this (wfb-ng core + FFmpeg/GStreamer + SDL3 + Vulkan renderer, GPL-3.0). Only do this if you want an architecture Aviateur's doesn't permit. Otherwise fork it.
+
+### Option E — Multi-adapter diversity
+
+Worth planning for, since you have two usable radios on different silicon.
+
+- **Via wfb-ng/pcap (Option B):** free — `wfb_rx` takes multiple interfaces and merges by packet.
+- **Via devourer/Aviateur (Option A):** would need new work; Aviateur is single-adapter today.
+
+A nice end state: AWUS1900 (devourer, high sensitivity, 4 antennas) + AXML (kernel/pcap) feeding one merged wfb-ng RX ring.
+
+---
+
+## 5. Recommended plan
+
+**Phase 0 — prove the link (an evening).** Option B2, stock wfb-ng + `ffplay`, on whichever adapter comes up first. Confirm you get video at all. While you're there, dump radiotap on received frames and record **the actual bandwidth, MCS, and whether LDPC/STBC are set** — this determines everything downstream.
+
+**Phase 1 — the real app (a weekend).** Fork Aviateur, bump devourer, add `0bda:8813` to the adapter enumeration, udev rule, test on Linux, then build the Windows package. You now have a GUI ground station on both platforms using the AWUS1900.
+
+**Phase 2 — optional polish.** Add a "capture source" selector to your fork (devourer/libusb vs. pcap/monitor interface) so the AXML works as a second option on Linux. Then multi-adapter diversity. Then, if you want an uplink, devourer's per-packet radiotap control makes adaptive-link feasible on the 8814AU.
+
+---
+
+## 6. Gotchas to check early
+
+- **Verify what the air unit is transmitting.** If anyone has set the WiFiLink 2 to 5 or 10 MHz narrowband, *only* Realtek-via-devourer can receive it — mt76 cannot do sub-20 MHz channels. Default is 20 MHz.
+- **LDPC.** If the air unit has LDPC enabled and your RX PHY can't decode it, you get zero packets and no error message. wfb-ng's docs call this out as the classic symptom: *"Some cards don't support LDPC and you can try to disable it on TX side if you don't receive any packets."*
+- **mt7921u monitor mode is kernel-version-sensitive** — reported broken around 6.18, needs ≥5.18 to exist at all. Pin a known-good kernel (Ubuntu 24.04's 6.8 is a reasonable baseline).
+- **`gs.key` must match the air unit's.** Pull it off the VTX's microSD on first boot.
+- **RTL8814AU kernel driver is historically flaky** (`aircrack-ng/rtl8814au`, `morrownr/8814au`). The devourer path sidesteps the kernel driver entirely — a real argument for Option A over B on this adapter.
+- **AWUS1900 is USB 3.0, large, and runs hot.** Some hosts mis-enumerate it as USB 2.0.
+- **Windows + AXML is not happening.** No monitor mode, no userspace driver. Accept it.
+
+---
+
+## Sources
+
+- [Runcam WiFiLink 2 — OpenIPC docs](https://docs.openipc.org/hardware/runcam/vtx/runcam-wifilink-v2/)
+- [wfb-ng — WiFi hardware wiki](https://github.com/svpcom/wfb-ng/wiki/WiFi-hardware)
+- [wfb-ng discussion #416 — MT7921 support](https://github.com/svpcom/wfb-ng/discussions/416)
+- [OpenIPC/aviateur](https://github.com/OpenIPC/aviateur) · [CMakeLists.txt](https://raw.githubusercontent.com/OpenIPC/aviateur/main/CMakeLists.txt)
+- [OpenIPC/devourer — supported hardware](https://github.com/OpenIPC/devourer)
+- [OpenIPC/fpv4win](https://github.com/OpenIPC/fpv4win)
+- [morrownr/USB-WiFi #387 — AWUS036AXM injection problems](https://github.com/morrownr/USB-WiFi/issues/387)
+- [aircrack-ng/rtl8814au #51 — AWUS1900 injection](https://github.com/aircrack-ng/rtl8814au/issues/51)
+- [ALFA Network AWUS1900 — WikiDevi](https://wikidevi.com/wiki/ALFA_Network_AWUS1900)
+- [OpenIPC/PixelPilot](https://github.com/OpenIPC/PixelPilot) · [PixelPilot_rk](https://github.com/OpenIPC/PixelPilot_rk)

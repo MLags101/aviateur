@@ -1,5 +1,6 @@
 ﻿#include "wfbng_link.h"
 
+#include <algorithm>
 #include <iomanip>
 #include <mutex>
 #include <set>
@@ -115,7 +116,12 @@ std::vector<DeviceId> WfbngLink::get_device_list() {
                 uint8_t bus_num = libusb_get_bus_number(dev);
                 uint8_t port_num = libusb_get_port_number(dev);
 
+                const bool is_awus1900 = desc.idVendor == 0x0bda && desc.idProduct == 0x8813;
+
                 std::stringstream ss;
+                if (is_awus1900) {
+                    ss << "ALFA AWUS1900 (RTL8814AU) - ";
+                }
                 ss << std::setw(4) << std::setfill('0') << std::hex << desc.idVendor << ":";
                 ss << std::setw(4) << std::setfill('0') << std::hex << desc.idProduct;
                 ss << std::dec << " [" << (int)bus_num << ":" << (int)port_num << "]";
@@ -126,6 +132,7 @@ std::vector<DeviceId> WfbngLink::get_device_list() {
                     .display_name = ss.str(),
                     .bus_num = bus_num,
                     .port_num = port_num,
+                    .rx_chain_count = static_cast<uint8_t>(is_awus1900 ? 4 : 2),
                 };
 
                 list.push_back(dev_id);
@@ -162,6 +169,7 @@ bool WfbngLink::start(const DeviceId &deviceId, uint8_t channel, int channelWidt
     GuiInterface::Instance().UpdateCount();
 
     keyPath = kPath;
+    rx_chain_count_ = std::clamp<std::size_t>(deviceId.rx_chain_count, 1, MAX_RX_CHAINS);
 
     if (usbThread) {
         GuiInterface::Instance().PutLog(LogLevel::Error, "USB thread already exists");
@@ -617,7 +625,7 @@ void WfbngLink::handle_80211_frame(const Packet &packet) {
     }
 #endif
 
-    static int8_t rssi[2] = {1, 1};
+    static int8_t rssi[4] = {1, 1, 1, 1};
     static uint8_t antenna[4] = {1, 1, 1, 1};
     uint32_t freq = 0;
     int8_t noise[4] = {1, 1, 1, 1};
@@ -627,8 +635,8 @@ void WfbngLink::handle_80211_frame(const Packet &packet) {
     // Video frame
     if (frame.MatchesChannelID(video_channel_id_be8)) {
         // Update signal quality
-        signal_quality_calculator->add_rssi(packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]);
-        signal_quality_calculator->add_snr(packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]);
+        signal_quality_calculator->add_rssi(std::to_array(packet.RxAtrib.rssi));
+        signal_quality_calculator->add_snr(std::to_array(packet.RxAtrib.snr));
 
 #ifndef _WIN32
         video_aggregator->process_packet(packet.Data.data() + sizeof(ieee80211_header),
@@ -657,8 +665,7 @@ void WfbngLink::handle_80211_frame(const Packet &packet) {
 #endif
 
         const auto quality = signal_quality_calculator->calculate_signal_quality();
-        link_score_[0] = quality.link_score[0];
-        link_score_[1] = quality.link_score[1];
+        link_score_ = quality.link_score;
         packets_lost_ = quality.lost_last_second;
     }
     // MAVLink frame
@@ -686,8 +693,12 @@ void WfbngLink::handle_80211_frame(const Packet &packet) {
     }
 }
 
-std::array<int, ANTENNA_COUNT> WfbngLink::get_link_score() const {
+std::array<int, MAX_RX_CHAINS> WfbngLink::get_link_score() const {
     return link_score_;
+}
+
+std::size_t WfbngLink::get_rx_chain_count() const {
+    return rx_chain_count_;
 }
 
 int WfbngLink::get_packet_loss() const {

@@ -5,7 +5,7 @@
 
 #include "transmitter.h"
 
-class Rtl8812aDevice;
+class RtlJaguarDevice;
 
 /**
  * @struct TxArgs
@@ -92,10 +92,10 @@ public:
 
     /**
      * @brief Configures and runs the transmitter with the given arguments.
-     * @param rtlDevice The Rtl8812aDevice pointer (if using USB).
+     * @param rtlDevice The RtlJaguarDevice pointer (if using USB).
      * @param arg TxArgs structure with user parameters.
      */
-    void run(Rtl8812aDevice *rtlDevice, TxArgs *arg);
+    void run(RtlJaguarDevice *rtlDevice, TxArgs *arg);
 
     /**
      * @brief Signals that the main loop should stop.

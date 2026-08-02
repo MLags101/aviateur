@@ -15,7 +15,7 @@ extern "C" {
 #include <vector>
 
 #include "../wfb-ng/wifibroadcast.hpp"
-#include "Rtl8812aDevice.h"
+#include "RtlJaguarDevice.h"
 
 /// A custom deleter for FEC pointer usage in unique_ptr
 struct FecDeleter {
@@ -263,7 +263,7 @@ public:
                    uint8_t *radiotapHeader,
                    size_t radiotapHeaderLen,
                    uint8_t frameType,
-                   Rtl8812aDevice *device);
+                   RtlJaguarDevice *device);
 
     ~UsbTransmitter() override = default;
 
@@ -286,5 +286,5 @@ private:
     uint8_t *radiotapHeader_;
     size_t radiotapHeaderLen_;
     uint8_t frameType_;
-    Rtl8812aDevice *rtlDevice_;
+    RtlJaguarDevice *rtlDevice_;
 };

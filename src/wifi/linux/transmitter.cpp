@@ -403,7 +403,7 @@ UsbTransmitter::UsbTransmitter(int k,
                                uint8_t *radiotapHeader,
                                size_t radiotapHeaderLen,
                                uint8_t frameType,
-                               Rtl8812aDevice *device)
+                               RtlJaguarDevice *device)
     : Transmitter(k, n, keypair, epoch, channelId), channelId_(channelId), currentOutput_(0), ieee80211Sequence_(0),
       radiotapHeader_(radiotapHeader), radiotapHeaderLen_(radiotapHeaderLen), frameType_(frameType),
       rtlDevice_(device) {}
@@ -473,7 +473,7 @@ void UsbTransmitter::injectPacket(const uint8_t *buf, const size_t size) {
 
     const bool result = rtlDevice_->send_packet(buffer.get(), totalSize);
     if (!result) {
-        printf("Rtl8812aDevice::send_packet failed!\n");
+        printf("RtlJaguarDevice::send_packet failed!\n");
     }
 
     const uint64_t key = (static_cast<uint64_t>(currentOutput_) << 8) | 0xff;

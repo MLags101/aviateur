@@ -24,7 +24,7 @@
 #include <thread>
 #include <vector>
 
-#include "Rtl8812aDevice.h"
+#include "RtlJaguarDevice.h"
 #include "fec_controller.h"
 
 #ifdef __linux__
@@ -41,11 +41,10 @@ struct DeviceId {
     std::string display_name;
     uint8_t bus_num;
     uint8_t port_num;
+    uint8_t rx_chain_count;
 };
 
 class AggregatorX;
-
-constexpr int ANTENNA_COUNT = 2;
 
 /// Receive packets from a Wi-Fi adapter.
 class WfbngLink {
@@ -76,7 +75,9 @@ public:
     /// Process a 802.11 frame.
     void handle_80211_frame(const Packet &packet);
 
-    std::array<int, ANTENNA_COUNT> get_link_score() const;
+    std::array<int, MAX_RX_CHAINS> get_link_score() const;
+
+    std::size_t get_rx_chain_count() const;
 
     int get_packet_loss() const;
 
@@ -85,7 +86,7 @@ protected:
     libusb_device_handle *devHandle{};
 
     std::shared_ptr<std::thread> usbThread;
-    std::unique_ptr<Rtl8812aDevice> rtlDevice;
+    std::unique_ptr<RtlJaguarDevice> rtlDevice;
 
     // In case a link is stopped before initializing an RTL device.
     std::atomic<bool> exit_requested{false};
@@ -110,8 +111,9 @@ protected:
 #endif
 
     std::shared_ptr<SignalQualityCalculator> signal_quality_calculator;
-    std::array<int, ANTENNA_COUNT> link_score_ = {}; // Percentage
-    int packets_lost_ = 0;                           // Number over the last second
+    std::array<int, MAX_RX_CHAINS> link_score_ = {}; // Percentage
+    std::size_t rx_chain_count_ = 2;
+    int packets_lost_ = 0; // Number over the last second
 
 #ifndef _WIN32
     // --------------- Adaptive link

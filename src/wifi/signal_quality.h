@@ -1,11 +1,16 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
-#include <utility>
+#include <string>
+#include <tuple>
 #include <vector>
+
+constexpr std::size_t MAX_RX_CHAINS = 4;
 
 inline double map_range(double input, double input_min, double input_max, double output_min, double output_max) {
     // 1. Clamp the input value first
@@ -18,12 +23,12 @@ inline double map_range(double input, double input_min, double input_max, double
 class SignalQualityCalculator {
 public:
     struct SignalQuality {
-        int lost_last_second;
-        int recovered_last_second;
-        int total_last_second;
-        int rssi[2];       // Received signal strength indicator
-        int snr[2];        // Signal to noice ratio
-        int link_score[2]; // Based on RSSI and SNR [1000, 2000]
+        int lost_last_second{};
+        int recovered_last_second{};
+        int total_last_second{};
+        std::array<int, MAX_RX_CHAINS> rssi{};       // Received signal strength indicator
+        std::array<int, MAX_RX_CHAINS> snr{};        // Signal-to-noise ratio
+        std::array<int, MAX_RX_CHAINS> link_score{}; // Based on RSSI and SNR [1000, 2000]
         std::string idr_code;
     };
 
@@ -31,32 +36,33 @@ public:
     ~SignalQualityCalculator() = default;
 
     /// Add a new RSSI entry with current timestamp
-    void add_rssi(uint8_t ant1, uint8_t ant2);
+    void add_rssi(const std::array<uint8_t, MAX_RX_CHAINS> &rssi);
 
     /// Add a new SNR entry with current timestamp
-    void add_snr(int8_t ant1, int8_t ant2);
+    void add_snr(const std::array<int8_t, MAX_RX_CHAINS> &snr);
 
     /// Add new FEC entry with current timestamp
     void add_fec(uint32_t p_all, uint32_t p_recovered, uint32_t p_lost);
 
     template <class T>
-    std::pair<float, float> get_average(const T &array) {
+    std::array<float, MAX_RX_CHAINS> get_average(const T &entries) {
         std::lock_guard lock(mutex_);
 
-        float sum1 = 0.f;
-        float sum2 = 0.f;
-        int count = static_cast<int>(array.size());
+        std::array<float, MAX_RX_CHAINS> sums{};
+        const int count = static_cast<int>(entries.size());
 
         if (count > 0) {
-            for (auto &entry : array) {
-                sum1 += entry.ant1;
-                sum2 += entry.ant2;
+            for (const auto &entry : entries) {
+                for (std::size_t chain = 0; chain < MAX_RX_CHAINS; ++chain) {
+                    sums[chain] += entry.values[chain];
+                }
             }
-            sum1 /= count;
-            sum2 /= count;
+            for (auto &sum : sums) {
+                sum /= count;
+            }
         }
 
-        return {sum1, sum2};
+        return sums;
     }
 
     /// Calculate signal quality over the averaging window
@@ -74,15 +80,13 @@ private:
     // We store a timestamp for each RSSI entry
     struct RssiEntry {
         std::chrono::steady_clock::time_point timestamp;
-        uint8_t ant1{};
-        uint8_t ant2{};
+        std::array<uint8_t, MAX_RX_CHAINS> values{};
     };
 
     // We store a timestamp for each RSSI entry
     struct SnrEntry {
         std::chrono::steady_clock::time_point timestamp;
-        int8_t ant1{};
-        int8_t ant2{};
+        std::array<int8_t, MAX_RX_CHAINS> values{};
     };
 
     // We store a timestamp for each FEC entry

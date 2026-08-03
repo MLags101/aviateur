@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
+#include <set>
 #include <vector>
 
 #include "src/gui_interface.h"
@@ -31,6 +34,22 @@ int read_sdp(void *opaque, uint8_t *buf, int buf_size) {
     state->ptr += read_len;
     state->sizeLeft -= read_len;
     return read_len;
+}
+
+std::vector<AVHWDeviceType> preferred_hardware_types() {
+#if defined(_WIN32)
+    // The Linux-hosted MinGW package enables NVIDIA NVDEC through FFmpeg's
+    // CUDA device API. D3D11VA/DXVA2 remain fallbacks for other FFmpeg builds.
+    return {AV_HWDEVICE_TYPE_CUDA, AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_DXVA2};
+#elif defined(__APPLE__)
+    return {AV_HWDEVICE_TYPE_VIDEOTOOLBOX};
+#else
+    // VAAPI is the native decode path for AMD and Intel GPUs on Linux.
+    return {AV_HWDEVICE_TYPE_VAAPI,
+            AV_HWDEVICE_TYPE_CUDA,
+            AV_HWDEVICE_TYPE_VDPAU,
+            AV_HWDEVICE_TYPE_VULKAN};
+#endif
 }
 } // namespace
 
@@ -243,17 +262,16 @@ std::shared_ptr<AVFrame> FfmpegDecoder::GetNextFrame() {
                         continue;
                     }
 
-                    // Check if resolution has changed or was initially unknown
-                    if (frameToReceive->width != width || frameToReceive->height != height) {
+                    // Check if resolution has changed or was initially unknown.
+                    const bool videoDimensionsChanged =
+                        frameToReceive->width != width || frameToReceive->height != height;
+                    if (videoDimensionsChanged) {
                         width = frameToReceive->width;
                         height = frameToReceive->height;
                         GuiInterface::Instance().PutLog(LogLevel::Info,
                                                         "Video resolution updated: {}x{}",
                                                         width,
                                                         height);
-                        if (videoConfigChangedCallback) {
-                            videoConfigChangedCallback(width, height, GetVideoFrameFormat());
-                        }
                     }
 
                     if (hwDecoderEnabled) {
@@ -261,11 +279,50 @@ std::shared_ptr<AVFrame> FfmpegDecoder::GetNextFrame() {
                             dropCurrentVideoFrame = false;
                             continue;
                         }
-                        if (av_hwframe_transfer_data(pFrameVideo.get(), hwFrame.get(), 0) < 0) {
-                            GuiInterface::Instance().PutLog(LogLevel::Warn, "av_hwframe_transfer_data failed");
-                            continue;
+
+                        // av_hwdevice_ctx_create() can succeed even when the
+                        // device cannot decode this codec. FFmpeg then rejects
+                        // the requested hardware format and returns an ordinary
+                        // software frame. Do not pass that frame to
+                        // av_hwframe_transfer_data(), which would discard every
+                        // frame and leave the display blank/green.
+                        if (frameToReceive->format != hwPixFmt) {
+                            const auto failedDecoder = hwDecoderName.value_or("unknown");
+                            const char *actualFormat = av_get_pix_fmt_name(
+                                static_cast<AVPixelFormat>(frameToReceive->format));
+                            const char *requestedFormat = av_get_pix_fmt_name(hwPixFmt);
+                            GuiInterface::Instance().PutLog(
+                                LogLevel::Warn,
+                                "Hardware decoder {} returned {} instead of {}; continuing with software decoding",
+                                failedDecoder,
+                                actualFormat ? actualFormat : "an unknown format",
+                                requestedFormat ? requestedFormat : "the requested hardware format");
+
+                            pFrameVideo = hwFrame;
+                            hwFrame.reset();
+                            hwDecoderEnabled = false;
+                            hwDecoderName.reset();
+                        } else {
+                            const int transferResult = av_hwframe_transfer_data(pFrameVideo.get(), hwFrame.get(), 0);
+                            if (transferResult < 0) {
+                                char errStr[AV_ERROR_MAX_STRING_SIZE];
+                                av_strerror(transferResult, errStr, AV_ERROR_MAX_STRING_SIZE);
+                                GuiInterface::Instance().PutLog(LogLevel::Warn,
+                                                                "av_hwframe_transfer_data failed: {}",
+                                                                errStr);
+                                continue;
+                            }
+                            av_frame_copy_props(pFrameVideo.get(), hwFrame.get());
                         }
-                        av_frame_copy_props(pFrameVideo.get(), hwFrame.get());
+                    }
+
+                    const auto framePixelFormat = static_cast<AVPixelFormat>(pFrameVideo->format);
+                    const bool videoConfigChanged =
+                        videoDimensionsChanged || framePixelFormat != decodedPixelFormat;
+                    decodedPixelFormat = framePixelFormat;
+
+                    if (videoConfigChanged && videoConfigChangedCallback) {
+                        videoConfigChangedCallback(width, height, decodedPixelFormat);
                     }
                     if (gotVideoFrameCallback) gotVideoFrameCallback(pFrameVideo);
                     return pFrameVideo;
@@ -351,13 +408,96 @@ std::shared_ptr<AVFrame> FfmpegDecoder::GetNextFrame() {
     }
 }
 
-bool FfmpegDecoder::createHwCtx(AVCodecContext *ctx, const AVHWDeviceType type) {
-    if (av_hwdevice_ctx_create(&hwDeviceCtx, type, nullptr, nullptr, 0) < 0) {
-        return false;
-    }
-    ctx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
+AVPixelFormat FfmpegDecoder::selectHwPixelFormat(AVCodecContext *ctx, const AVPixelFormat *formats) {
+    auto *decoder = static_cast<FfmpegDecoder *>(ctx->opaque);
 
-    return true;
+    for (const AVPixelFormat *format = formats; *format != AV_PIX_FMT_NONE; ++format) {
+        if (decoder && decoder->hwDecoderEnabled && *format == decoder->hwPixFmt) {
+            return *format;
+        }
+    }
+
+    if (decoder && decoder->hwDecoderEnabled) {
+        GuiInterface::Instance().PutLog(
+            LogLevel::Warn,
+            "FFmpeg rejected the {} hardware format; selecting a software format",
+            decoder->hwDecoderName.value_or("requested"));
+    }
+
+    // FFmpeg calls get_format() again without the failed hardware format when
+    // device or codec initialisation fails. Select the first ordinary pixel
+    // format instead of accidentally switching to a different hardware API.
+    for (const AVPixelFormat *format = formats; *format != AV_PIX_FMT_NONE; ++format) {
+        const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(*format);
+        if (descriptor && !(descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+            return *format;
+        }
+    }
+
+    return formats[0];
+}
+
+bool FfmpegDecoder::createHwCtx(AVCodecContext *ctx, const AVHWDeviceType type) {
+    std::vector<std::string> deviceCandidates;
+
+#if defined(__linux__)
+    if (type == AV_HWDEVICE_TYPE_VAAPI) {
+        if (const char *configuredDevice = std::getenv("AVIATEUR_VAAPI_DEVICE");
+            configuredDevice && configuredDevice[0] != '\0') {
+            deviceCandidates.emplace_back(configuredDevice);
+        }
+
+        std::error_code error;
+        if (std::filesystem::is_directory("/dev/dri", error)) {
+            std::vector<std::string> discoveredDevices;
+            for (const auto &entry : std::filesystem::directory_iterator("/dev/dri", error)) {
+                const auto filename = entry.path().filename().string();
+                if (filename.starts_with("renderD")) {
+                    discoveredDevices.push_back(entry.path().string());
+                }
+            }
+            std::sort(discoveredDevices.begin(), discoveredDevices.end());
+            for (const auto &device : discoveredDevices) {
+                if (std::find(deviceCandidates.begin(), deviceCandidates.end(), device) == deviceCandidates.end()) {
+                    deviceCandidates.push_back(device);
+                }
+            }
+        }
+    }
+#endif
+
+    // An empty name asks FFmpeg to select the platform's default device. It is
+    // also the only candidate required by D3D11VA/DXVA2 on Windows.
+    deviceCandidates.emplace_back();
+
+    const char *typeName = av_hwdevice_get_type_name(type);
+    for (const auto &device : deviceCandidates) {
+        AVBufferRef *candidateContext = nullptr;
+        const char *deviceName = device.empty() ? nullptr : device.c_str();
+        const int result = av_hwdevice_ctx_create(&candidateContext, type, deviceName, nullptr, 0);
+        if (result == 0) {
+            hwDeviceCtx = candidateContext;
+            ctx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
+            GuiInterface::Instance().PutLog(LogLevel::Info,
+                                            "Opened {} hardware device{}{}",
+                                            typeName ? typeName : "unknown",
+                                            device.empty() ? "" : ": ",
+                                            device);
+            return true;
+        }
+
+        av_buffer_unref(&candidateContext);
+        char errorText[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(result, errorText, sizeof(errorText));
+        GuiInterface::Instance().PutLog(LogLevel::Warn,
+                                        "Unable to open {} hardware device{}{}: {}",
+                                        typeName ? typeName : "unknown",
+                                        device.empty() ? "" : ": ",
+                                        device,
+                                        errorText);
+    }
+
+    return false;
 }
 
 bool FfmpegDecoder::OpenVideo() {
@@ -390,6 +530,9 @@ bool FfmpegDecoder::OpenVideo() {
 
             hwDecoderEnabled = false;
             hwDecoderName = {};
+            hwDecoderType = AV_HWDEVICE_TYPE_NONE;
+            hwPixFmt = AV_PIX_FMT_NONE;
+            decodedPixelFormat = AV_PIX_FMT_NONE;
 
             if (!forceSwDecoder) {
                 // Log available hardware decoder types.
@@ -399,6 +542,7 @@ bool FfmpegDecoder::OpenVideo() {
                     GuiInterface::Instance().PutLog(LogLevel::Info, "Found hardware decoder: " + decoderName);
                 }
 
+                std::vector<const AVCodecHWConfig *> hardwareConfigs;
                 for (int configIndex = 0;; configIndex++) {
                     const AVCodecHWConfig *config = avcodec_get_hw_config(codec, configIndex);
                     if (!config) {
@@ -406,30 +550,46 @@ bool FfmpegDecoder::OpenVideo() {
                     }
 
                     if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) {
-                        hwDecoderEnabled = true;
-
-                        hwPixFmt = config->pix_fmt;
-                        hwDecoderType = config->device_type;
-
-                        auto decoderName = std::string(av_hwdevice_get_type_name(hwDecoderType));
-                        GuiInterface::Instance().PutLog(LogLevel::Info, "Configuring hardware decoder: " + decoderName);
-
-                        std::ostringstream oss;
-                        oss << "Hardware acceleration pixel format: " << hwPixFmt;
-                        GuiInterface::Instance().PutLog(LogLevel::Info, oss.str());
-
-                        hwDecoderEnabled = createHwCtx(pVideoCodecCtx, hwDecoderType);
-
-                        if (!hwDecoderEnabled) {
-                            GuiInterface::Instance().PutLog(LogLevel::Warn, "Creating hardware contex failed");
-                            continue;
-                        }
-
-                        hwDecoderName = decoderName;
-                        GuiInterface::Instance().PutLog(LogLevel::Info, "Using hardware decoder: {}", decoderName);
-
-                        break;
+                        hardwareConfigs.push_back(config);
                     }
+                }
+
+                std::vector<const AVCodecHWConfig *> orderedConfigs;
+                std::set<AVHWDeviceType> addedTypes;
+                for (const auto preferredType : preferred_hardware_types()) {
+                    for (const auto *config : hardwareConfigs) {
+                        if (config->device_type == preferredType && addedTypes.insert(preferredType).second) {
+                            orderedConfigs.push_back(config);
+                        }
+                    }
+                }
+                for (const auto *config : hardwareConfigs) {
+                    if (addedTypes.insert(config->device_type).second) {
+                        orderedConfigs.push_back(config);
+                    }
+                }
+
+                for (const auto *config : orderedConfigs) {
+                    hwPixFmt = config->pix_fmt;
+                    hwDecoderType = config->device_type;
+
+                    const char *decoderTypeName = av_hwdevice_get_type_name(hwDecoderType);
+                    const std::string decoderName = decoderTypeName ? decoderTypeName : "unknown";
+                    GuiInterface::Instance().PutLog(LogLevel::Info,
+                                                    "Configuring hardware decoder: {} (pixel format {})",
+                                                    decoderName,
+                                                    static_cast<int>(hwPixFmt));
+
+                    if (!createHwCtx(pVideoCodecCtx, hwDecoderType)) {
+                        continue;
+                    }
+
+                    hwDecoderEnabled = true;
+                    hwDecoderName = decoderName;
+                    pVideoCodecCtx->opaque = this;
+                    pVideoCodecCtx->get_format = &FfmpegDecoder::selectHwPixelFormat;
+                    GuiInterface::Instance().PutLog(LogLevel::Info, "Using hardware decoder: {}", decoderName);
+                    break;
                 }
 
                 if (!hwDecoderEnabled) {

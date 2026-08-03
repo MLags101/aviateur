@@ -120,9 +120,38 @@ endif ()
 
 add_subdirectory(3rd/devourer)
 target_include_directories(${PROJECT_NAME} PRIVATE "3rd/devourer/src" "3rd/devourer/hal")
+if (WIN32 AND MINGW)
+    # devourer contains both <libusb.h> and <libusb-1.0/libusb.h> includes.
+    # PkgConfig::LIBUSB supplies the nested directory; its parent is required
+    # for the latter form used by MinGW code paths and demo targets.
+    target_include_directories(WiFiDriver PUBLIC "${LIBUSB_INCLUDEDIR}")
+
+    # Aviateur's Windows integration is receive-only. These optional devourer
+    # transmit utilities include POSIX-only process control and are not part of
+    # the application or WiFiDriverDemo acceptance path.
+    set_target_properties(
+            WiFiDriverTxDemo
+            PrecoderDemo
+            StreamTxDemo
+            SvcTxDemo
+            StreamDuplexDemo
+            PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif ()
+
+# A Linux-hosted MinGW build must not consume the host Vulkan SDK. Pathfinder's
+# OpenGL backend is supported on Windows and does not require target Vulkan
+# headers or a Windows Vulkan loader.
+if (WIN32 AND MINGW)
+    set(VECGUI_VULKAN OFF CACHE BOOL "Use Vulkan instead of OpenGL" FORCE)
+endif ()
 
 add_subdirectory(3rd/vecgui)
 target_include_directories(${PROJECT_NAME} PRIVATE "3rd/vecgui/src")
+if (WIN32 AND MINGW AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    # Pathfinder enables SSE4.1 intrinsics for non-ARM Windows targets but its
+    # bundled CMake only adds the matching compiler option on Linux.
+    target_compile_options(pathfinder PUBLIC -msse4.1)
+endif ()
 
 add_subdirectory(3rd/json)
 target_include_directories(${PROJECT_NAME} PRIVATE "3rd/json/include")

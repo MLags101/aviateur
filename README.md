@@ -87,7 +87,7 @@ git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
 export VCPKG_ROOT="$HOME/vcpkg"
 "$VCPKG_ROOT/bootstrap-vcpkg.sh"
 "$VCPKG_ROOT/vcpkg" install libusb:x64-mingw-dynamic \
-                                 ffmpeg:x64-mingw-dynamic \
+                                 "ffmpeg[nvcodec]:x64-mingw-dynamic" \
                                  libsodium:x64-mingw-dynamic
 ```
 
@@ -105,6 +105,7 @@ cmake -S . -B build-windows -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
   -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-w64-mingw32.cmake" \
   -DVCPKG_TARGET_TRIPLET=x64-mingw-dynamic \
+  -DVECGUI_VULKAN=OFF \
   -DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config
 cmake --build build-windows --parallel
 ```
@@ -136,6 +137,8 @@ $env:DEVOURER_CHANNEL = "161"
 
 Stop it with `Ctrl+C`, then launch `.\aviateur.exe`. Select the AWUS1900, channel 161, 20 MHz, and the matching `gs.key`. Do not add a private `gs.key` to a distributable build archive.
 
+The MinGW vcpkg FFmpeg port disables Direct3D hardware decoding, so the Windows cross-build must use its `nvcodec` feature for NVIDIA decoding. This uses NVDEC/CUDA interfaces supplied by the installed NVIDIA display driver; a CUDA toolkit is not required. Leave `force sw decoding` unchecked and confirm the player reports `cuda` as its decoder.
+
 #### Linux (Ubuntu/Debian)
 
 ```bash
@@ -143,7 +146,7 @@ sudo apt update
 sudo apt install build-essential cmake pkg-config \
                  libavformat-dev libavcodec-dev libswresample-dev \
                  libswscale-dev libavutil-dev libvulkan-dev libusb-1.0-0-dev \
-                 libsodium-dev libpcap-dev xorg-dev
+                 libsodium-dev libpcap-dev xorg-dev mesa-va-drivers vainfo
 git clone --recursive https://github.com/OpenIPC/aviateur
 cd aviateur
 git -C 3rd/devourer checkout e74d57e96b8e47a6ea6dae6778414e1bf09ddbc2
@@ -183,6 +186,17 @@ cd build-awus1900/bin
 
 Select `ALFA AWUS1900 (RTL8814AU) - 0bda:8813`, channel 161, `20 MHz`, and the `gs.key` that matches the air unit. Leave Adaptive Link disabled for receive-only testing. The HUD displays all four RTL8814AU receive chains; RTL8812AU adapters continue to display two.
 
+For AMD hardware decoding, verify VAAPI can access a DRM render node:
+
+```bash
+ls -l /dev/dri/renderD*
+vainfo --display drm --device /dev/dri/renderD128
+```
+
+Leave `force sw decoding` unchecked. Aviateur probes the available `/dev/dri/renderD*` nodes and should report `Using hardware decoder: vaapi`. If the GPU uses a nonstandard node, set it explicitly before launching, for example `AVIATEUR_VAAPI_DEVICE=/dev/dri/renderD129 ./aviateur`.
+
+The optional `forward` control sends the recovered RTP stream to `127.0.0.1` on the entered UDP port. Valid ports are 1–65535; Aviateur remembers the last selected port. Opening the control focuses the field; typing replaces the displayed default, while Backspace or Delete clears it.
+
 #### macOS (Homebrew)
 
 ```bash
@@ -202,6 +216,9 @@ make
   See [wsl-map-usb.md](wsl-map-usb.md) for details.
 - **AWUS1900 not listed**: Verify `lsusb` reports `0bda:8813`, reinstall the udev rule, and unplug/reconnect the adapter.
 - **No video on AWUS1900**: Confirm channel 161 / 20 MHz, keep Adaptive Link disabled, and use the same `gs.key` as the air unit.
+- **Blank or green video with Vulkan decode errors**: If the log says `VK_KHR_video_decode_queue` is unsupported, Aviateur now falls back to software decoding automatically. On an older build, enable `force sw decoding` in the player controls and restart playback.
+- **Linux remains on software decoding**: Install `mesa-va-drivers`, verify `vainfo --display drm --device /dev/dri/renderD128`, and ensure the user can open the listed render node. The log records each VAAPI device attempt and its error.
+- **Windows remains on software decoding**: Confirm vcpkg installed `ffmpeg[nvcodec]:x64-mingw-dynamic`, recopy the rebuilt FFmpeg DLLs from vcpkg, update the NVIDIA display driver, and look for `Using hardware decoder: cuda`. A CUDA toolkit is not required.
 - **Latency or dropped USB transfers**: Use a high-quality USB cable and confirm `lsusb -t` reports `5000M` for the adapter.
 - **`GLXBadFBConfig` in a virtual machine**: Enable 3D acceleration for the VM or use Mesa software rendering. Run from the binary directory so Aviateur can find its packaged assets: `cd build-awus1900/bin && LIBGL_ALWAYS_SOFTWARE=1 ./aviateur`.
 

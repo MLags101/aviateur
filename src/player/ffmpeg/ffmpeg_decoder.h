@@ -80,8 +80,8 @@ public:
     }
 
     AVPixelFormat GetVideoFrameFormat() const {
-        if (hwDecoderEnabled) {
-            return AV_PIX_FMT_NV12;
+        if (decodedPixelFormat != AV_PIX_FMT_NONE) {
+            return decodedPixelFormat;
         }
         return pVideoCodecCtx->pix_fmt;
     }
@@ -118,6 +118,8 @@ private:
     std::function<void(const std::shared_ptr<AVFrame> &frame)> gotVideoFrameCallback;
 
     bool createHwCtx(AVCodecContext *ctx, enum AVHWDeviceType type);
+
+    static AVPixelFormat selectHwPixelFormat(AVCodecContext *ctx, const AVPixelFormat *formats);
 
     void emitBitrateUpdate(uint64_t pBitrate) {
         bitrateUpdateCallback(pBitrate);
@@ -177,7 +179,8 @@ private:
     bool hwDecoderEnabled = false;
     std::optional<std::string> hwDecoderName;
     bool forceSwDecoder = false;
-    AVPixelFormat hwPixFmt;
+    AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
+    AVPixelFormat decodedPixelFormat = AV_PIX_FMT_NONE;
     AVBufferRef *hwDeviceCtx = nullptr;
     std::atomic<bool> dropCurrentVideoFrame = false;
     std::shared_ptr<AVFrame> hwFrame;

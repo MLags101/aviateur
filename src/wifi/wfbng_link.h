@@ -93,7 +93,11 @@ protected:
 
     std::string keyPath;
 
+#ifdef _WIN32
+    SOCKET socketFd = INVALID_SOCKET;
+#else
     int socketFd = INVALID_SOCKET;
+#endif
 
     bool first_rtp_packet_received = false;
 

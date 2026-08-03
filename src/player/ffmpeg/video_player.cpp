@@ -86,11 +86,14 @@ void VideoPlayerFfmpeg::play(const std::string &playUrl, bool forceSoftwareDecod
         localDecoder->bitrateUpdateCallback = [](uint64_t bitrate) { GuiInterface::Instance().EmitBitrateUpdate(bitrate); };
 
         // Handle dynamic resolution change
-        localDecoder->videoConfigChangedCallback = [this](int w, int h, AVPixelFormat fmt) {
+        auto *decoderRaw = localDecoder.get();
+        localDecoder->videoConfigChangedCallback = [this, decoderRaw](int w, int h, AVPixelFormat fmt) {
             if (w > 0 && h > 0) {
+                current_decoder_name = decoderRaw->hwDecoderName.value_or("Software");
                 // If resolution changed, re-emit ready signal to update UI labels
                 if (!has_emitted_ready_ || w != video_width() || h != video_height()) {
-                    GuiInterface::Instance().EmitDecoderReady(w, h, decoder->GetFramerate(), current_decoder_name);
+                    GuiInterface::Instance().EmitDecoderReady(
+                        w, h, decoderRaw->GetFramerate(), current_decoder_name);
                     has_emitted_ready_ = true;
                 }
                 update_video_info(w, h, fmt);
@@ -112,6 +115,10 @@ void VideoPlayerFfmpeg::play(const std::string &playUrl, bool forceSoftwareDecod
                         continue;
                     }
 
+                    // Hardware setup may fail only when FFmpeg decodes the
+                    // first frame. Keep the displayed decoder name in sync
+                    // with the automatic software fallback.
+                    current_decoder_name = localDecoder->hwDecoderName.value_or("Software");
                     consecutiveFrameCount++;
 
                     // Success path: notify recovery only if we previously lost signal AND we have stable frames

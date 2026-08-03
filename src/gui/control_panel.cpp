@@ -1,8 +1,73 @@
 #include "control_panel.h"
 
+#include <charconv>
+
 #include <resources/default_resource.h>
 
 #include "settings_tab.h"
+
+namespace {
+class PortTextEdit final : public vecgui::TextEdit {
+public:
+    void grab_focus() override {
+        vecgui::TextEdit::grab_focus();
+        has_focus_ = true;
+        replace_on_input_ = true;
+    }
+
+    void release_focus() override {
+        vecgui::TextEdit::release_focus();
+        has_focus_ = false;
+    }
+
+    void input(vecgui::InputEvent &event) override {
+        if (!has_focus_) {
+            vecgui::TextEdit::input(event);
+            return;
+        }
+
+        if (event.type == vecgui::InputEventType::Text) {
+            const auto codepoint = event.args.text.codepoint;
+            if (codepoint >= '0' && codepoint <= '9') {
+                std::string value = replace_on_input_ ? "" : get_text();
+                if (value.size() < 5) {
+                    value.push_back(static_cast<char>(codepoint));
+                    set_text(value);
+                }
+                replace_on_input_ = false;
+            }
+            event.consumed = true;
+            return;
+        }
+
+        if (event.type == vecgui::InputEventType::Key) {
+            const auto &key = event.args.key;
+            if ((key.pressed || key.repeated) && key.key == vecgui::KeyCode::Backspace) {
+                std::string value = replace_on_input_ ? "" : get_text();
+                if (!value.empty()) {
+                    value.pop_back();
+                }
+                set_text(value);
+                replace_on_input_ = false;
+                event.consumed = true;
+                return;
+            }
+            if ((key.pressed || key.repeated) && key.key == vecgui::KeyCode::Delete) {
+                set_text("");
+                replace_on_input_ = false;
+                event.consumed = true;
+                return;
+            }
+        }
+
+        vecgui::TextEdit::input(event);
+    }
+
+private:
+    bool has_focus_ = false;
+    bool replace_on_input_ = true;
+};
+} // namespace
 
 void ControlPanel::update_dongle_list(const std::shared_ptr<vecgui::MenuButton> &menu_button,
                                       std::string &dongle_name) {
@@ -314,10 +379,13 @@ void ControlPanel::custom_ready() {
             forward_con->set_color(vecgui::ColorU(147, 115, 165));
             vbox_blockable->add_child(forward_con);
 
-            auto on_collapsed = [](bool collapsed) {
+            auto on_collapsed = [this](bool collapsed) {
                 // if (collapsed) {
                 //     GuiInterface::Instance().forward_port_.reset();
                 // }
+                if (!collapsed && forward_port_edit) {
+                    forward_port_edit->grab_focus();
+                }
             };
             forward_con->connect_signal("collapsed", on_collapsed);
 
@@ -329,11 +397,13 @@ void ControlPanel::custom_ready() {
             label->set_text(FTR("target port"));
             hbox_container->add_child(label);
 
-            forward_port_edit = std::make_shared<vecgui::TextEdit>();
-            forward_port_edit->set_custom_minimum_size({0, 32});
-            forward_port_edit->set_numbers_only(true);
+            forward_port_edit = std::make_shared<PortTextEdit>();
+            forward_port_edit->set_custom_minimum_size({96, 32});
+            forward_port_edit->set_editable(true);
             forward_port_edit->container_sizing.flag_h = vecgui::ContainerSizingFlag::Fill;
-            forward_port_edit->set_text("");
+            auto configured_forward_port = GuiInterface::Instance().ini_[CONFIG_WIFI][WIFI_FORWARD_PORT];
+            forward_port_edit->set_text(configured_forward_port.empty() ? std::to_string(DEFAULT_PORT)
+                                                                         : configured_forward_port);
             hbox_container->add_child(forward_port_edit);
 
             // auto callback = [this](uint32_t) { dongle_names[1] = dongle_menu_button_b_->get_selected_item_text(); };
@@ -377,12 +447,19 @@ void ControlPanel::custom_ready() {
 
                                 std::optional<std::string> forward_port;
                                 if (!forward_con->get_collapse()) {
-                                    if (forward_port_edit->get_text().empty()) {
+                                    const auto port_text = forward_port_edit->get_text();
+                                    int port = 0;
+                                    const auto parse_result =
+                                        std::from_chars(port_text.data(), port_text.data() + port_text.size(), port);
+                                    const bool valid_port = !port_text.empty() && parse_result.ec == std::errc{} &&
+                                                            parse_result.ptr == port_text.data() + port_text.size() &&
+                                                            port >= 1 && port <= 65535;
+                                    if (!valid_port) {
                                         GuiInterface::Instance().ShowTip("Invalid port for RTP forwarding", true);
                                         all_started = false;
                                         break;
                                     }
-                                    forward_port = forward_port_edit->get_text();
+                                    forward_port = port_text;
                                 }
 
                                 res = GuiInterface::Start(target_device_id.value(),
